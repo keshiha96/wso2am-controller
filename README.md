@@ -54,8 +54,8 @@ When using go 1.11 modules (`GO111MODULE=on`), issue the following
 commands --- starting in whatever working directory you like.
 
 ```sh
-git clone https://github.com/kubernetes/sample-controller.git
-cd sample-controller
+git clone https://github.com/keshiha96/wso2am-controller.git
+cd wso2am-controller
 ```
 
 Note, however, that if you intend to
