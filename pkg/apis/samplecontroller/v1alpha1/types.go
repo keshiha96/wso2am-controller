@@ -36,6 +36,9 @@ type Foo struct {
 type FooSpec struct {
 	DeploymentName string `json:"deploymentName"`
 	Replicas       *int32 `json:"replicas"`
+	ServiceName    string `json:"serviceName"`
+	//Type           string `json:"type"`
+	//NodePort       *int32 `json:"nodePort"`
 }
 
 // FooStatus is the status for a Foo resource
@@ -52,3 +55,4 @@ type FooList struct {
 
 	Items []Foo `json:"items"`
 }
+
