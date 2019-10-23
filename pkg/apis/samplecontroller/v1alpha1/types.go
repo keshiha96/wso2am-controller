@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -34,11 +35,12 @@ type Foo struct {
 
 // FooSpec is the spec for a Foo resource
 type FooSpec struct {
-	DeploymentName string `json:"deploymentName"`
-	Replicas       *int32 `json:"replicas"`
-	ServiceName    string `json:"serviceName"`
-	//Type           string `json:"type"`
-	//NodePort       *int32 `json:"nodePort"`
+	DeploymentName string             `json:"deploymentName"`
+	Replicas       *int32             `json:"replicas"`
+	ServiceName    string             `json:"serviceName"`
+	ServType       corev1.ServiceType `json:"servType"`
+	ExternalIps    []string           `json:"externalIps"`
+	//NodePort       int32              `json:"nodePort"`
 }
 
 // FooStatus is the status for a Foo resource
