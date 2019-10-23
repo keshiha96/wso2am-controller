@@ -27,14 +27,19 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
+	apps2informers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+
+	"k8s.io/apimachinery/pkg/util/intstr"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
+
+	app2listers "k8s.io/client-go/listers/core/v1"
 
 	samplev1alpha1 "k8s.io/sample-controller/pkg/apis/samplecontroller/v1alpha1"
 	clientset "k8s.io/sample-controller/pkg/generated/clientset/versioned"
@@ -51,7 +56,6 @@ const (
 	// ErrResourceExists is used as part of the Event 'reason' when a Foo fails
 	// to sync due to a Deployment of the same name already existing.
 	ErrResourceExists = "ErrResourceExists"
-
 	// MessageResourceExists is the message used for Events when a resource
 	// fails to sync due to a Deployment already existing
 	MessageResourceExists = "Resource %q already exists and is not managed by Foo"
@@ -68,7 +72,9 @@ type Controller struct {
 	sampleclientset clientset.Interface
 
 	deploymentsLister appslisters.DeploymentLister
+	servicesLister    app2listers.ServiceLister
 	deploymentsSynced cache.InformerSynced
+	servicesSynced    cache.InformerSynced
 	foosLister        listers.FooLister
 	foosSynced        cache.InformerSynced
 
@@ -88,6 +94,7 @@ func NewController(
 	kubeclientset kubernetes.Interface,
 	sampleclientset clientset.Interface,
 	deploymentInformer appsinformers.DeploymentInformer,
+	serviceInformer apps2informers.ServiceInformer,
 	fooInformer informers.FooInformer) *Controller {
 
 	// Create event broadcaster
@@ -105,6 +112,8 @@ func NewController(
 		sampleclientset:   sampleclientset,
 		deploymentsLister: deploymentInformer.Lister(),
 		deploymentsSynced: deploymentInformer.Informer().HasSynced,
+		servicesLister:    serviceInformer.Lister(),
+		servicesSynced:    serviceInformer.Informer().HasSynced,
 		foosLister:        fooInformer.Lister(),
 		foosSynced:        fooInformer.Informer().HasSynced,
 		workqueue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Foos"),
@@ -131,6 +140,21 @@ func NewController(
 			newDepl := new.(*appsv1.Deployment)
 			oldDepl := old.(*appsv1.Deployment)
 			if newDepl.ResourceVersion == oldDepl.ResourceVersion {
+				// Periodic resync will send update events for all known Deployments.
+				// Two different versions of the same Deployment will always have different RVs.
+				return
+			}
+			controller.handleObject(new)
+		},
+		DeleteFunc: controller.handleObject,
+	})
+
+	serviceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: controller.handleObject,
+		UpdateFunc: func(old, new interface{}) {
+			newServ := new.(*corev1.Service)
+			oldServ := old.(*corev1.Service)
+			if newServ.ResourceVersion == oldServ.ResourceVersion {
 				// Periodic resync will send update events for all known Deployments.
 				// Two different versions of the same Deployment will always have different RVs.
 				return
@@ -269,11 +293,27 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
+	serviceName := foo.Spec.ServiceName
+	if serviceName == "" {
+		// We choose to absorb the error here as the worker would requeue the
+		// resource otherwise. Instead, the next time the resource is updated
+		// the resource will be queued again.
+		utilruntime.HandleError(fmt.Errorf("%s: service name must be specified", key))
+		return nil
+	}
+
 	// Get the deployment with the name specified in Foo.spec
 	deployment, err := c.deploymentsLister.Deployments(foo.Namespace).Get(deploymentName)
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
 		deployment, err = c.kubeclientset.AppsV1().Deployments(foo.Namespace).Create(newDeployment(foo))
+	}
+
+	// Get the service with the name specified in Foo.spec
+	service, err := c.servicesLister.Services(foo.Namespace).Get(serviceName)
+	// If the resource doesn't exist, we'll create it
+	if errors.IsNotFound(err) {
+		service, err = c.kubeclientset.CoreV1().Services(foo.Namespace).Create(newService(foo))
 	}
 
 	// If an error occurs during Get/Create, we'll requeue the item so we can
@@ -287,6 +327,14 @@ func (c *Controller) syncHandler(key string) error {
 	// a warning to the event recorder and ret
 	if !metav1.IsControlledBy(deployment, foo) {
 		msg := fmt.Sprintf(MessageResourceExists, deployment.Name)
+		c.recorder.Event(foo, corev1.EventTypeWarning, ErrResourceExists, msg)
+		return fmt.Errorf(msg)
+	}
+
+	// If the Service is not controlled by this Foo resource, we should log
+	// a warning to the event recorder and ret
+	if !metav1.IsControlledBy(service, foo) {
+		msg := fmt.Sprintf(MessageResourceExists, service.Name)
 		c.recorder.Event(foo, corev1.EventTypeWarning, ErrResourceExists, msg)
 		return fmt.Errorf(msg)
 	}
@@ -421,3 +469,50 @@ func newDeployment(foo *samplev1alpha1.Foo) *appsv1.Deployment {
 		},
 	}
 }
+
+func newService(foo *samplev1alpha1.Foo) *corev1.Service {
+	labels := map[string]string{
+		"app":        "wso2am",
+		"controller": foo.Name,
+	}
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      foo.Spec.ServiceName,
+			Namespace: foo.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(foo, samplev1alpha1.SchemeGroupVersion.WithKind("Foo")),
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			//Type:     "NodePort",    values are fetched from example-foo.yaml file
+			Type: foo.Spec.ServType,
+			//ExternalIPs: []string{"192.168.99.101"},
+			ExternalIPs: foo.Spec.ExternalIps,
+			Ports: []corev1.ServicePort{
+				{
+					Name:     "port1",
+					Protocol: corev1.ProtocolTCP,
+					Port:     9443,
+					//NodePort:   foo.Spec.NodePort,
+					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 9443},
+				},
+				{
+					Name:     "port2",
+					Protocol: corev1.ProtocolTCP,
+					Port:     8280,
+					//NodePort:   30181,
+					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8280},
+				},
+				{
+					Name:     "port3",
+					Protocol: corev1.ProtocolTCP,
+					Port:     8243,
+					//NodePort:   30182,
+					TargetPort: intstr.IntOrString{Type: intstr.Int, IntVal: 8243},
+				},
+			},
+		},
+	}
+}
+
